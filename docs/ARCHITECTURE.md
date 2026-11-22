@@ -304,6 +304,9 @@ These are hypotheses. Each is validated by before and after measurements.
   user has chosen the reaction, otherwise `addMessageReaction`. An existing reaction is sent in
   Telegram's spelling (the heart has no variation selector). TDLib applies the change locally at once,
   drops older choices beyond the account's limit and sends `updateMessageInteractionInfo`.
+  Toggles of one message run one at a time: later clicks wait (at most 8 per message, 32 messages)
+  until the previous mutation is answered, so each reads the state the previous one left; an error
+  releases the next waiting toggle.
 - **Chips are laid out in Rust and drawn by Slint**, inside the bubble below the text or media; the
   time joins the last chip row when it fits, as in Telegram Desktop. Their emoji are coloured rasters
   from the message text engine (a few KiB each), counted in the 96 MiB viewport budget and freed with

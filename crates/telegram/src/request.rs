@@ -251,7 +251,8 @@ pub(crate) fn toggle_reaction(message: &Value) -> Result<Value, CommandError> {
         json!({"@type":"addMessageReaction","chat_id":chat,"message_id":id,
             "reaction_type":reaction_type,"is_big":false,"update_recent_reactions":true})
     };
-    request["@extra"] = json!({"command":"reaction"});
+    // The engine releases the next held toggle of this message when this answer arrives.
+    request["@extra"] = json!({"command":"reaction","chat":chat,"message":id});
     Ok(request)
 }
 
