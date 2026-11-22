@@ -206,6 +206,8 @@ struct Cached {
     /// Cell size per album member, for image keys: (member, width, height).
     cells: Vec<(MessageId, f32, f32)>,
     links: crate::text::Links,
+    /// Reaction emoji rasters.
+    raster_bytes: usize,
 }
 
 pub(crate) struct Feed {
@@ -380,7 +382,7 @@ impl Feed {
                     .any(|row| row.key == keys[i] && row.context == context)
                 {
                     cache.retain(|row| row.key != keys[i]);
-                    let (row, cells, links) =
+                    let (row, cells, links, raster_bytes) =
                         self.render(&history.messages[groups[i].clone()], &context);
                     rendered = true;
                     geometry.measure(i, row.height);
@@ -390,6 +392,7 @@ impl Feed {
                         row,
                         cells,
                         links,
+                        raster_bytes,
                     });
                     break;
                 }
@@ -427,7 +430,8 @@ impl Feed {
                 let mut cached = cache.swap_remove(index);
                 let cost = (cached.row.text_width * scale * cached.row.text_height * scale * 4.0)
                     as usize
-                    + cached.links.bytes();
+                    + cached.links.bytes()
+                    + cached.raster_bytes;
                 if bytes.saturating_add(cost) <= 96 * 1024 * 1024 {
                     bytes += cost;
                     cached.row.row_y = y;
@@ -447,13 +451,18 @@ impl Feed {
         &self,
         group: &[Message],
         context: &Context,
-    ) -> (MessageRow, Vec<(MessageId, f32, f32)>, crate::text::Links) {
+    ) -> (
+        MessageRow,
+        Vec<(MessageId, f32, f32)>,
+        crate::text::Links,
+        usize,
+    ) {
         let scale = self.scale.get().clamp(0.5, 4.0);
         let max_width = self.width.get().clamp(80.0, 504.0);
         let (first, last) = (&group[0], &group[group.len() - 1]);
         if first.service {
             let (row, links) = self.render_service(first, context, scale, max_width);
-            return (row, Vec::new(), links);
+            return (row, Vec::new(), links, 0);
         }
         let round = matches!(first.attachment, Some(tg_core::Attachment::Round(_)));
         let sticker = matches!(
@@ -583,11 +592,22 @@ impl Feed {
         } else {
             PAD_TOP + sender_height + header_height
         };
+        let (reaction_chips, placement, reaction_bytes) = match crate::reactions::owner(group) {
+            Some(owner) if !owner.reactions.is_empty() => crate::reactions::chips(
+                &mut self.engine.borrow_mut(),
+                &owner.reactions,
+                scale,
+                available.max(1.0),
+            ),
+            _ => (Vec::new(), Default::default(), 0),
+        };
+        let reacted = !reaction_chips.is_empty();
         // As in Telegram: the time sits on the last text line when it fits, else on its own.
+        // With reactions it moves to their last row instead.
         let inline = last_line + 8.0 + time_width;
         let (content_width, footer) = if text.is_none() {
             (0.0, false)
-        } else if inline <= text_width {
+        } else if reacted || inline <= text_width {
             (text_width, false)
         } else if inline <= available {
             (inline, false)
@@ -608,18 +628,43 @@ impl Feed {
         if header_height > 0.0 {
             bubble_width = bubble_width.max(220.0_f32.min(max_width));
         }
-        let bubble_height = if text.is_some() {
+        let time_joins = placement.last_right + 8.0 + time_width <= available;
+        if reacted {
+            let last_row = if time_joins {
+                placement.last_right + 8.0 + time_width
+            } else {
+                time_width
+            };
+            bubble_width = bubble_width.max(placement.width.max(last_row) + 2.0 * PAD);
+        }
+        let reactions_y = if text.is_some() {
+            text_y + text_height + 6.0
+        } else if card {
+            attachment_y + card_height + 6.0
+        } else {
+            media_y + media_height + if round { 26.0 } else { 0.0 } + 6.0
+        };
+        let bubble_height = if reacted {
+            reactions_y + placement.height + if time_joins { 0.0 } else { FOOTER } + PAD_BOTTOM
+        } else if text.is_some() {
             text_y + text_height + if footer { FOOTER } else { 0.0 } + PAD_BOTTOM
         } else if card {
             attachment_y + card_height + FOOTER + PAD_BOTTOM
         } else {
             media_y + media_height + if round { 26.0 } else { 0.0 }
         };
-        let over_media = text.is_none() && !card;
+        let over_media = text.is_none() && !card && !reacted;
         let (time_x, time_y) = if over_media {
             (
                 bubble_width - time_width - 10.0,
                 bubble_height - TIME_HEIGHT - 8.0,
+            )
+        } else if reacted && time_joins {
+            (
+                bubble_width - PAD - time_width,
+                reactions_y
+                    + placement.last_y
+                    + (crate::reactions::CHIP_HEIGHT - TIME_HEIGHT) / 2.0,
             )
         } else {
             (
@@ -783,10 +828,13 @@ impl Feed {
             time_y,
             time_over_media: over_media,
             checks,
+            reactions: ModelRc::new(VecModel::from(reaction_chips)),
+            reactions_y,
+            can_react: crate::reactions::can_react(group),
             ..Default::default()
         };
         crate::attachments::decorate(&mut row, first, self.audio.get());
-        (row, cells, links)
+        (row, cells, links, reaction_bytes)
     }
     /// A centred translucent pill ("Anna joined the group"), without a bubble, time or menu.
     fn render_service(
@@ -854,6 +902,22 @@ impl Feed {
         let newer_known = range.end < messages.len()
             || (h.newer.is_none() && h.pending_around.is_none() && !h.latest_requested);
         older_known && newer_known
+    }
+    /// The message that owns the reactions of row `key`, with its current list, if the row
+    /// can get reactions.
+    pub fn reaction_state(
+        &self,
+        key: MessageId,
+    ) -> Option<(ChatId, MessageId, Vec<tg_core::Reaction>)> {
+        let h = self.history.borrow();
+        let range = groups(&h.messages)
+            .into_iter()
+            .find(|r| h.messages[r.end - 1].id == key)?;
+        let group = &h.messages[range];
+        if !crate::reactions::can_react(group) {
+            return None;
+        }
+        crate::reactions::owner(group).map(|m| (m.chat, m.id, m.reactions.clone()))
     }
     /// Edge albums wait for the existing prefetch to establish both neighboring boundaries.
     pub fn action_members(&self, key: MessageId) -> Vec<MessageId> {
@@ -1064,6 +1128,88 @@ pub(crate) fn album_layout(sizes: &[(f32, f32)], max_width: f32) -> (Vec<[f32; 4
 mod feed_tests {
     use super::*;
     use tg_core::{Message, MessageId};
+    fn plain_context() -> Context {
+        Context {
+            complete: true,
+            members: Vec::new(),
+            date: false,
+            continued: false,
+            tail: true,
+            last: false,
+            read: false,
+            unread: false,
+        }
+    }
+    #[test]
+    fn reactions_extend_the_bubble_and_take_the_time_into_their_row() {
+        use crate::reactions::CHIP_HEIGHT;
+        let feed = Feed::new(None);
+        let context = plain_context();
+        let plain = message(1);
+        let (row, ..) = feed.render(std::slice::from_ref(&plain), &context);
+        assert_eq!(row.reactions.row_count(), 0);
+        let mut reacted = plain.clone();
+        reacted.reactions = vec![
+            tg_core::Reaction {
+                emoji: "👍".into(),
+                count: 3,
+                chosen: true,
+            },
+            tg_core::Reaction {
+                emoji: "\u{2764}".into(),
+                count: 1200,
+                chosen: false,
+            },
+        ];
+        let (with, _, _, bytes) = feed.render(std::slice::from_ref(&reacted), &context);
+        assert!(with.can_react);
+        assert!(bytes > 0, "chip emoji are rasterized and counted");
+        assert_eq!(with.reactions.row_count(), 2);
+        let chip = with.reactions.row_data(0).unwrap();
+        assert!(chip.chosen);
+        assert_eq!(chip.count, "3");
+        assert_eq!(chip.reaction, "👍");
+        assert_eq!(with.reactions.row_data(1).unwrap().count, "1.2K");
+        assert!(with.reactions_y >= with.text_y + with.text_height);
+        assert!(with.bubble_height >= row.bubble_height + CHIP_HEIGHT);
+        // Short text: the time joins the chip row instead of a footer below it.
+        assert!(with.time_y >= with.reactions_y);
+        assert!(with.time_y + TIME_HEIGHT <= with.reactions_y + CHIP_HEIGHT);
+        let last = with.reactions.row_data(1).unwrap();
+        assert!(10.0 + last.x + last.width <= with.time_x);
+        // Incoming: a 32 px time label without read checks, PAD from the right edge.
+        assert_eq!(with.time_x + 32.0 + PAD, with.bubble_width);
+
+        // Pending messages cannot get reactions, and the row says so.
+        let mut pending = reacted.clone();
+        pending.send_state = SendState::Pending;
+        let (row, ..) = feed.render(std::slice::from_ref(&pending), &context);
+        assert!(!row.can_react);
+    }
+    #[test]
+    fn reaction_state_names_the_owner_of_a_row() {
+        let feed = Feed::new(None);
+        let mut first = album_item(1, 77);
+        first.text.clear();
+        let mut second = album_item(2, 77);
+        second.outgoing = false;
+        second.text = "Caption".into();
+        second.reactions = vec![tg_core::Reaction {
+            emoji: "🔥".into(),
+            count: 2,
+            chosen: false,
+        }];
+        feed.history.borrow_mut().messages = vec![first, second.clone(), message(3)];
+        let (chat, id, reactions) = feed.reaction_state(MessageId(2 * 1048576)).unwrap();
+        assert_eq!((chat, id), (second.chat, second.id));
+        assert_eq!(reactions, second.reactions);
+        // A row is addressed by its newest member only.
+        assert!(feed.reaction_state(MessageId(1048576)).is_none());
+        assert_eq!(
+            feed.reaction_state(MessageId(3 * 1048576)).map(|s| s.1),
+            Some(MessageId(3 * 1048576))
+        );
+    }
     #[test]
     fn album_caption_links_use_the_displayed_caption_and_expire_with_the_row() {
         let feed = Feed::new(None);
@@ -1136,6 +1282,7 @@ mod feed_tests {
             album: 0,
             sender_id: 0,
             sender: None,
+            reactions: Vec::new(),
         }
     }
     #[test]
@@ -1480,6 +1627,7 @@ mod action_tests {
             sender_id: 0,
             sender: None,
             photo: None,
+            reactions: Vec::new(),
         }
     }
     #[test]

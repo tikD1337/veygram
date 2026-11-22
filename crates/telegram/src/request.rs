@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::ffi::CString;
 use tg_core::{ChatId, Command, CommandError, MessageId};
 
-use crate::mapping::{MAX_LINK_BYTES, MAX_TEXT_BYTES, PAGE_SIZE, error};
+use crate::mapping::{MAX_LINK_BYTES, MAX_TEXT_BYTES, PAGE_SIZE, error, integer, malformed};
 
 pub(crate) fn encode(command: Command) -> Result<Value, CommandError> {
     let (mut request, tag) = match command {
@@ -72,6 +72,22 @@ pub(crate) fn encode(command: Command) -> Result<Value, CommandError> {
                 "input_message_content":input_text(text)}),
                 "edit_text",
             )
+        }
+        Command::ToggleReaction {
+            chat,
+            message,
+            reaction,
+        } => {
+            valid_id(message)?;
+            if !tg_core::valid_reaction(&reaction) {
+                return Err(error(-2, "Invalid reaction."));
+            }
+            // TDLib answers from its loaded message; the engine keeps no message copy.
+            return Ok(
+                json!({"@type":"getMessage","chat_id":chat.0,"message_id":message.0,
+                "@extra":{"command":"toggle_reaction","chat":chat.0,"message":message.0,
+                "reaction":reaction}}),
+            );
         }
         Command::DeleteMessages {
             chat,
@@ -200,6 +216,45 @@ pub(crate) fn encode(command: Command) -> Result<Value, CommandError> {
     Ok(request)
 }
 
+/// The second step of `Command::ToggleReaction`, built from TDLib's `message` answer: remove
+/// the reaction when the user has chosen it, otherwise add it. An existing reaction is sent
+/// with Telegram's own spelling (the heart has no variation selector there).
+pub(crate) fn toggle_reaction(message: &Value) -> Result<Value, CommandError> {
+    let extra = &message["@extra"];
+    let chat = integer(&extra["chat"])?;
+    let id = integer(&extra["message"])?;
+    let wanted = extra["reaction"]
+        .as_str()
+        .filter(|r| tg_core::valid_reaction(r))
+        .ok_or_else(|| error(-2, "Invalid reaction."))?;
+    if integer(&message["chat_id"])? != chat || integer(&message["id"])? != id {
+        return Err(malformed());
+    }
+    let existing = message["interaction_info"]["reactions"]["reactions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|r| {
+            r["type"]["@type"] == "reactionTypeEmoji"
+                && r["type"]["emoji"]
+                    .as_str()
+                    .is_some_and(|e| tg_core::same_reaction(e, wanted))
+        });
+    let emoji = existing
+        .and_then(|r| r["type"]["emoji"].as_str())
+        .unwrap_or(wanted);
+    let reaction_type = json!({"@type":"reactionTypeEmoji","emoji":emoji});
+    let mut request = if existing.is_some_and(|r| r["is_chosen"] == true) {
+        json!({"@type":"removeMessageReaction","chat_id":chat,"message_id":id,
+            "reaction_type":reaction_type})
+    } else {
+        json!({"@type":"addMessageReaction","chat_id":chat,"message_id":id,
+            "reaction_type":reaction_type,"is_big":false,"update_recent_reactions":true})
+    };
+    request["@extra"] = json!({"command":"reaction"});
+    Ok(request)
+}
+
 pub(crate) fn history(chat: ChatId, before: MessageId) -> Value {
     // TDLib returns messages older than from_message_id when offset is 0, and rejects
     // identifiers that are not real message ids (code 400), so the cursor is passed as is.
@@ -288,6 +343,74 @@ pub(crate) fn serialize(value: &Value) -> Result<CString, CommandError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn answer(reactions: Value, wanted: &str) -> Value {
+        json!({"@type":"message","id":1048576,"chat_id":7,
+            "interaction_info":{"reactions":{"reactions":reactions}},
+            "@extra":{"command":"toggle_reaction","chat":7,"message":1048576,"reaction":wanted}})
+    }
+
+    #[test]
+    fn toggling_a_reaction_first_reads_the_current_message() {
+        let r = encode(Command::ToggleReaction {
+            chat: ChatId(7),
+            message: MessageId(1048576),
+            reaction: "🔥".into(),
+        })
+        .unwrap();
+        assert_eq!(r["@type"], "getMessage");
+        assert_eq!(r["message_id"], 1048576);
+        assert_eq!(r["@extra"]["command"], "toggle_reaction");
+        assert_eq!(r["@extra"]["reaction"], "🔥");
+        for (message, reaction) in [(0, "🔥"), (-5, "🔥"), (1, ""), (1, "a\u{0}")] {
+            assert!(
+                encode(Command::ToggleReaction {
+                    chat: ChatId(7),
+                    message: MessageId(message),
+                    reaction: reaction.into(),
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn toggle_removes_a_chosen_reaction_and_adds_any_other() {
+        let chosen = json!([{"type":{"@type":"reactionTypeEmoji","emoji":"\u{2764}"},
+            "total_count":3,"is_chosen":true}]);
+        // The picker's heart carries U+FE0F; Telegram's spelling is sent back.
+        let r = toggle_reaction(&answer(chosen.clone(), "\u{2764}\u{FE0F}")).unwrap();
+        assert_eq!(r["@type"], "removeMessageReaction");
+        assert_eq!(r["reaction_type"]["emoji"], "\u{2764}");
+        assert_eq!(r["@extra"]["command"], "reaction");
+
+        let r = toggle_reaction(&answer(chosen, "👍")).unwrap();
+        assert_eq!(r["@type"], "addMessageReaction");
+        assert_eq!(r["reaction_type"]["@type"], "reactionTypeEmoji");
+        assert_eq!(r["reaction_type"]["emoji"], "👍");
+        assert_eq!(r["is_big"], false);
+
+        let other = json!([{"type":{"@type":"reactionTypeEmoji","emoji":"👍"},
+            "total_count":1,"is_chosen":false}]);
+        assert_eq!(
+            toggle_reaction(&answer(other, "👍")).unwrap()["@type"],
+            "addMessageReaction"
+        );
+        assert_eq!(
+            toggle_reaction(&answer(Value::Null, "👍")).unwrap()["@type"],
+            "addMessageReaction"
+        );
+    }
+
+    #[test]
+    fn toggle_rejects_an_answer_for_another_message() {
+        let mut value = answer(Value::Null, "👍");
+        value["id"] = json!(2097152);
+        assert!(toggle_reaction(&value).is_err());
+        let mut value = answer(Value::Null, "👍");
+        value["@extra"]["reaction"] = json!("");
+        assert!(toggle_reaction(&value).is_err());
+    }
 
     #[test]
     fn uploads_use_local_paths_and_optional_plain_captions() {

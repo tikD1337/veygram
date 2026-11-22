@@ -164,6 +164,7 @@ fn message_bytes(m: &tg_core::Message) -> usize {
             .map_or(0, |r| r.sender.capacity() + r.preview.capacity() + 128)
         + m.forwarded.as_ref().map_or(0, String::capacity)
         + attachment_bytes(&m.attachment)
+        + reactions_bytes(&m.reactions)
         + m.text.capacity()
         + m.entities.capacity() * std::mem::size_of::<tg_core::TextEntity>()
         + m.entities
@@ -198,6 +199,7 @@ fn event_bytes(e: &Event) -> usize {
         Event::ReplyResolved { reply, .. } => reply
             .as_ref()
             .map_or(0, |r| r.sender.capacity() + r.preview.capacity() + 128),
+        Event::MessageReactionsChanged { reactions, .. } => reactions_bytes(reactions),
         Event::MessagesDeleted { messages, .. } => {
             messages.capacity() * std::mem::size_of::<tg_core::MessageId>()
         }
@@ -224,6 +226,12 @@ fn event_bytes(e: &Event) -> usize {
     }
 }
 
+fn reactions_bytes(reactions: &[tg_core::Reaction]) -> usize {
+    reactions
+        .iter()
+        .map(|r| std::mem::size_of::<tg_core::Reaction>() + r.emoji.capacity())
+        .sum()
+}
 fn attachment_bytes(value: &Option<tg_core::Attachment>) -> usize {
     match value {
         Some(tg_core::Attachment::Voice(v)) => v.waveform.capacity() + file_bytes(&v.file),

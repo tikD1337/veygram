@@ -6,7 +6,7 @@ use tg_core::{
     AuthState, ChatId, CommandError, CommandKind, EntityKind, Event, Message, MessageId, SendState,
     TextEntity,
 };
-use tg_core::{MediaFile, Photo, Video};
+use tg_core::{MAX_REACTIONS, MediaFile, Photo, Reaction, Video};
 
 use crate::chats::Chats;
 
@@ -54,6 +54,7 @@ pub(crate) fn td_error(value: &Value) -> CommandError {
         Some("PHONE_CODE_INVALID") => "The verification code is invalid.",
         Some("PHONE_CODE_EXPIRED") => "The verification code has expired.",
         Some("PASSWORD_HASH_INVALID") => "The password is invalid.",
+        Some("REACTION_INVALID") => "This reaction is not available here.",
         _ => match code {
             401 => "Authorization is required.",
             429 => "Too many requests. Try again later.",
@@ -83,6 +84,7 @@ pub(crate) fn command_kind(value: &Value) -> CommandKind {
         Some("send_photo") => CommandKind::SendPhoto,
         Some("send_document") => CommandKind::SendDocument,
         Some("edit_text") => CommandKind::EditText,
+        Some("toggle_reaction" | "reaction") => CommandKind::ToggleReaction,
         Some("delete") => CommandKind::DeleteMessages,
         Some("forward") => CommandKind::ForwardMessages,
         Some("replied") => CommandKind::GetRepliedMessage,
@@ -346,7 +348,46 @@ pub(crate) fn message(
         album,
         sender_id,
         sender,
+        reactions: reactions(&value["interaction_info"]["reactions"]["reactions"])?,
     }))
+}
+
+/// Emoji reactions from a `vector<messageReaction>` (null means none), in Telegram's order.
+/// Custom-emoji and paid reactions are skipped, as are oversized or empty entries; at most
+/// MAX_REACTIONS are kept.
+pub(crate) fn reactions(value: &Value) -> Result<Vec<Reaction>, CommandError> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let source = value.as_array().ok_or_else(malformed)?;
+    let mut reactions = Vec::with_capacity(source.len().min(MAX_REACTIONS));
+    for item in source {
+        if reactions.len() == MAX_REACTIONS {
+            break;
+        }
+        if item["type"]["@type"] != "reactionTypeEmoji" {
+            continue;
+        }
+        let Some(emoji) = item["type"]["emoji"]
+            .as_str()
+            .filter(|e| tg_core::valid_reaction(e))
+        else {
+            continue;
+        };
+        let count = i32::try_from(integer(&item["total_count"])?)
+            .map_err(|_| malformed())?
+            .max(0);
+        let chosen = item["is_chosen"] == true;
+        if count == 0 && !chosen {
+            continue;
+        }
+        reactions.push(Reaction {
+            emoji: emoji.to_owned(),
+            count,
+            chosen,
+        });
+    }
+    Ok(reactions)
 }
 
 fn origin(value: &Value, users: &Users, chats: &Chats) -> (i64, String) {
@@ -531,6 +572,18 @@ impl Decoder {
                     });
                 }
             }
+            // Clients receive reactions with the interaction info (views, forwards, replies);
+            // updateMessageReactions is the bot-only variant with the same reaction list.
+            Some("updateMessageInteractionInfo") => emit(Event::MessageReactionsChanged {
+                chat: ChatId(integer(&value["chat_id"])?),
+                message: MessageId(integer(&value["message_id"])?),
+                reactions: reactions(&value["interaction_info"]["reactions"]["reactions"])?,
+            }),
+            Some("updateMessageReactions") => emit(Event::MessageReactionsChanged {
+                chat: ChatId(integer(&value["chat_id"])?),
+                message: MessageId(integer(&value["message_id"])?),
+                reactions: reactions(&value["reactions"])?,
+            }),
             Some("updateMessageEdited") => emit(Event::MessageEdited {
                 chat: ChatId(integer(&value["chat_id"])?),
                 message: MessageId(integer(&value["message_id"])?),

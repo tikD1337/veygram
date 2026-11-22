@@ -105,6 +105,7 @@ network; one short run per client. Details: [docs/BENCHMARKS.md](docs/BENCHMARKS
 - [x] Sending text messages
 - [x] Sending a photo or document with a caption, from the file picker or a pasted image ¹
 - [x] Reply, edit, delete and forward from a context menu
+- [x] Emoji reactions: counters under the bubble, click to toggle, six quick reactions above the menu ¹
 - [x] Video playback with GPU decoding (Windows Media Foundation)
 - [x] Voice messages with a waveform, and round video messages played inside their circle
 - [x] Files: download with progress, open with a SmartScreen mark, confirmation for programs ¹
@@ -125,8 +126,8 @@ remaining work into these areas; some already have working foundations listed ab
 - [ ] **[Media & creation](docs/ROADMAP.md#41-media--creation):** send videos, albums and multiple
   files, drag-and-drop, upload progress; record voice and round video messages; edit media and
   scheduled sends.
-- [ ] **[Chat interactivity](docs/ROADMAP.md#42-chat-interactivity):** polls and quizzes, reactions,
-  pinning, synchronized drafts, message links and selecting multiple messages.
+- [ ] **[Chat interactivity](docs/ROADMAP.md#42-chat-interactivity):** polls and quizzes, the full
+  reaction picker with custom and paid reactions, pinning, synchronized drafts, message links and selecting multiple messages.
 - [ ] **[Channels, groups & moderation](docs/ROADMAP.md#43-channels-groups--moderation):** forums and
   topics, channel comments and discussion threads, profiles, member management and admin tools.
 - [ ] **[Bots & Mini Apps](docs/ROADMAP.md#44-bots--mini-apps):** keyboards, inline queries, payments

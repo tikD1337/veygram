@@ -124,6 +124,10 @@ Replies, reply quotes, forwarding, editing and deletion were added 2026-11-16.
       options, media and permissions, including clear read-only states.
 - [ ] Reactions: picker, quick reaction, counts and reactors, custom/Premium and paid reactions
       where available; respect chat limits and animate only visible reactions.
+      Done 2026-11-22: emoji reaction chips under the bubble (count, chosen state), click to
+      toggle, a quick strip of six reactions above the message menu, live updates from
+      `updateMessageInteractionInfo`. Still open: the full picker from the chat's available
+      reactions, reactor lists, custom-emoji and paid reactions, reaction animations.
 - [ ] Pin/unpin messages, notification choice, pinned-message bar and paged pinned-message list;
       navigate among pins in chats, topics and Saved Messages.
 - [ ] Server drafts: text, formatting and reply target, synchronized between devices and restored

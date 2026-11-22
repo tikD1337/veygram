@@ -123,6 +123,8 @@ pub struct Message {
     pub sender: Option<String>,
     /// Video file; its preview frame is `photo`.
     pub video: Option<crate::Video>,
+    /// Emoji reactions in Telegram's order, at most [`crate::MAX_REACTIONS`].
+    pub reactions: Vec<crate::Reaction>,
 }
 
 /// Bounded chat-row preview, not a retained message or history cache.
@@ -254,6 +256,13 @@ pub enum Event {
         chat: ChatId,
         message: MessageId,
         edited: bool,
+    },
+    /// The full new reaction list of a message (possibly empty), at most
+    /// [`crate::MAX_REACTIONS`] entries.
+    MessageReactionsChanged {
+        chat: ChatId,
+        message: MessageId,
+        reactions: Vec<crate::Reaction>,
     },
     MessagesDeleted {
         chat: ChatId,

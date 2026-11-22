@@ -8,6 +8,7 @@ mod history;
 mod media;
 mod models;
 mod outgoing;
+mod reactions;
 pub use outgoing::AttachmentSources;
 mod scale;
 mod streaming;
@@ -38,7 +39,9 @@ mod generated {
     #![allow(missing_debug_implementations, clippy::unwrap_used, clippy::todo)]
     slint::include_modules!();
 }
-use generated::{AppWindow, ChatRow, MediaViewer, MessageRow, PhotoCell, Theme};
+use generated::{
+    AppWindow, ChatRow, MediaViewer, MessageRow, PhotoCell, QuickReaction, ReactionChip, Theme,
+};
 
 #[derive(Debug, Default)]
 pub struct Options {
@@ -72,6 +75,7 @@ struct State {
     check: check::Check,
     attachments: attachments::Attachments,
     actions: actions::Actions,
+    quick: reactions::Quick,
     media: Rc<RefCell<media::Media>>,
     chats: Rc<Chats>,
     feed: Rc<Feed>,
@@ -530,6 +534,11 @@ impl State {
         match event {
             Event::LocalFileSendFinished(path) => self.upload_finished(&path),
             Event::RoundFrame(frame) => self.round_frame(window, frame),
+            Event::MessageReactionsChanged {
+                chat,
+                message,
+                reactions,
+            } => self.reactions_changed(window, chat, message, reactions),
             event @ (Event::MessageProperties { .. }
             | Event::MessageContentChanged { .. }
             | Event::MessageEdited { .. }
@@ -935,6 +944,7 @@ impl Ui {
             check: Default::default(),
             attachments: Default::default(),
             actions: actions::Actions::new(chats.clone()),
+            quick: Default::default(),
             media,
             chats,
             feed,
@@ -963,6 +973,7 @@ impl Ui {
             scale_applied: Cell::new(tg_core::check_scale(options.interface_scale)),
         });
         actions::bind(&window, &state);
+        reactions::bind(&window, &state);
         attachments::bind(&window, &state);
         outgoing::bind(&window, &state);
         scale::bind(&window, &state);

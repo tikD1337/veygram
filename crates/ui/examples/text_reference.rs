@@ -13,6 +13,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut engine = text::TextEngine::new(None);
     let fixtures = [
         ("single-emoji", "\u{1f642}", vec![]),
+        // A reaction chip emoji: the bare heart as Telegram spells it, drawn in colour.
+        ("reaction", "\u{2764}\u{FE0F}", vec![]),
         (
             "styled",
             "Bold, italic, underline, strike. cargo build\nA hidden spoiler and a link.",
@@ -79,10 +81,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             sender_id: 0,
             sender: None,
             send_state: SendState::Sent,
+            reactions: Vec::new(),
         };
         for (suffix, scale, width) in [("1x", 1.0, 300.0), ("2x", 2.0, 600.0)] {
             let rendered = if name == "single-emoji" {
                 engine.render_emoji(&message, scale, 128.0 * scale)
+            } else if name == "reaction" {
+                engine.render_symbol(&message.text, scale, 15.0)
             } else {
                 engine.render(&message, scale, width)
             };

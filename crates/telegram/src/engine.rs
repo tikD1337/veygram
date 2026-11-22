@@ -353,6 +353,15 @@ fn run(shared: Arc<Shared>, mut parameters: Option<Value>, callback: impl Fn(Eve
                 });
             }
         }
+        if value["@type"] == "message"
+            && value["@extra"]["command"] == "toggle_reaction"
+            && let Err(error) = request::toggle_reaction(&value).and_then(|r| shared.send_value(r))
+        {
+            emit(Event::CommandFailed {
+                command: CommandKind::ToggleReaction,
+                error,
+            });
+        }
         if let Err(error) = decoder.apply(&value, &mut emit) {
             emit(Event::CommandFailed {
                 command: command_kind(&value["@extra"]["command"]),
@@ -518,6 +527,55 @@ mod tests {
             requests.try_recv(),
             Err(mpsc::TryRecvError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn toggling_a_reaction_reads_the_message_then_adds_or_removes_it() {
+        let (shared, requests, updates) = fake_shared();
+        let running = shared.clone();
+        let thread = std::thread::spawn(move || run(running, None, |_| {}));
+        let engine = Engine {
+            shared,
+            thread: Some(thread),
+        };
+        for (chosen, expected) in [
+            (false, "addMessageReaction"),
+            (true, "removeMessageReaction"),
+        ] {
+            engine
+                .send(Command::ToggleReaction {
+                    chat: ChatId(7),
+                    message: MessageId(1048576),
+                    reaction: "👍".into(),
+                })
+                .unwrap();
+            let get: Value = serde_json::from_str(&requests.recv().unwrap()).unwrap();
+            assert_eq!(get["@type"], "getMessage");
+            updates
+                .send(
+                    json!({"@type":"message","@client_id":7,"@extra":get["@extra"],
+                    "id":1048576,"chat_id":7,"interaction_info":{"reactions":{"reactions":[
+                        {"type":{"@type":"reactionTypeEmoji","emoji":"👍"},
+                        "total_count":1,"is_chosen":chosen}]}}})
+                    .to_string(),
+                )
+                .unwrap();
+            let change: Value = serde_json::from_str(&requests.recv().unwrap()).unwrap();
+            assert_eq!(change["@type"], expected);
+            assert_eq!(change["chat_id"], 7);
+            assert_eq!(change["message_id"], 1048576);
+            assert_eq!(change["reaction_type"]["emoji"], "👍");
+            updates
+                .send(json!({"@type":"ok","@client_id":7,"@extra":change["@extra"]}).to_string())
+                .unwrap();
+        }
+        engine.send(Command::ShutDown).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&requests.recv().unwrap()).unwrap()["@type"],
+            "close"
+        );
+        updates.send(r#"{"@type":"updateAuthorizationState","@client_id":7,"authorization_state":{"@type":"authorizationStateClosed"}}"#.into()).unwrap();
+        engine.shutdown().unwrap();
     }
 
     #[test]

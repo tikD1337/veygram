@@ -87,6 +87,7 @@ fn message() -> tg_core::Message {
         photo: None,
         entities: vec![],
         send_state: tg_core::SendState::Sent,
+        reactions: Vec::new(),
     }
 }
 #[test]
