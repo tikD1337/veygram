@@ -594,6 +594,7 @@ impl Demo {
             return;
         };
         let chats = self.chats.clone();
+        let changes = self.changes.clone();
         // One demo-only arrival, three seconds after startup; no periodic notification timer.
         let _ = std::thread::Builder::new()
             .name("tg-demo-incoming".into())
@@ -621,6 +622,14 @@ impl Demo {
                     send_state: SendState::Sent,
                     reactions: Vec::new(),
                 };
+                // Stored like a sent message, so actions such as reactions can find it.
+                if let Ok(mut changes) = changes.lock()
+                    && changes.entries.len() < 512
+                {
+                    changes
+                        .entries
+                        .insert((message.chat, message.id), Some(message.clone()));
+                }
                 if let Ok(mut chats) = chats.lock()
                     && let Some(chat) = chats.iter_mut().find(|c| c.id == message.chat)
                 {

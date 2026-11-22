@@ -830,7 +830,9 @@ impl Feed {
             checks,
             reactions: ModelRc::new(VecModel::from(reaction_chips)),
             reactions_y,
-            can_react: crate::reactions::can_react(group),
+            // As for the other album actions: until both album edges are known, a later page
+            // may bring the captioned item that owns the reactions.
+            can_react: context.complete && crate::reactions::can_react(group),
             ..Default::default()
         };
         crate::attachments::decorate(&mut row, first, self.audio.get());
@@ -904,7 +906,7 @@ impl Feed {
         older_known && newer_known
     }
     /// The message that owns the reactions of row `key`, with its current list, if the row
-    /// can get reactions.
+    /// can get reactions. A partial album at a paging edge has no owner yet.
     pub fn reaction_state(
         &self,
         key: MessageId,
@@ -913,6 +915,9 @@ impl Feed {
         let range = groups(&h.messages)
             .into_iter()
             .find(|r| h.messages[r.end - 1].id == key)?;
+        if !self.complete_album(&h.messages, &range) {
+            return None;
+        }
         let group = &h.messages[range];
         if !crate::reactions::can_react(group) {
             return None;
@@ -1209,6 +1214,23 @@ mod feed_tests {
             feed.reaction_state(MessageId(3 * 1048576)).map(|s| s.1),
             Some(MessageId(3 * 1048576))
         );
+        // An album at the edge of the loaded pages may still gain its captioned first item:
+        // no owner and no clickable chips until the older page arrives.
+        let mut tail = album_item(13, 78);
+        tail.outgoing = false;
+        let mut last = album_item(14, 78);
+        last.outgoing = false;
+        {
+            let mut h = feed.history.borrow_mut();
+            h.chat = Some(ChatId(1));
+            h.older = Some(MessageId(13 * 1048576));
+            h.messages = vec![tail.clone(), last.clone()];
+        }
+        assert!(feed.reaction_state(MessageId(14 * 1048576)).is_none());
+        let mut partial = plain_context();
+        partial.complete = false;
+        let (row, ..) = feed.render(&[tail, last], &partial);
+        assert!(!row.can_react);
     }
     #[test]
     fn album_caption_links_use_the_displayed_caption_and_expire_with_the_row() {
