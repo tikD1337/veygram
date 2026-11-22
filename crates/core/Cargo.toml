@@ -11,4 +11,4 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-url = "=2.5.8"
+url = "=2.5.9"

@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-    Builds the portable Veygram release: one zip with veygram.exe, TDLib, its libraries,
-    the Visual C++ runtime and the license texts.
+    Builds the Veygram release: portable zip and Windows installer with veygram.exe,
+    TDLib, its libraries, the Visual C++ runtime and license texts.
 
 .DESCRIPTION
     Telegram clients that are distributed carry their own application credentials
@@ -13,21 +13,32 @@
     The zip unpacks into one folder. veygram.exe loads tdjson.dll from its own folder;
     tdjson.dll finds OpenSSL and zlib there too. The Visual C++ runtime DLLs are copied
     app-locally, as Microsoft allows, so a clean Windows 10 or 11 x64 needs nothing else.
+    When Inno Setup (ISCC.exe) is available, an unsigned installer is also built.
 
 .EXAMPLE
-    .\scripts\package-release.ps1 -TdlibBin E:\tdlib\install\bin -CrtDir E:\vsst\VC\Redist\MSVC\14.51.36231\x64\Microsoft.VC145.CRT -LicenseDir E:\vcpkg\installed\x64-windows\share
+    .\scripts\package-release.ps1 -TdlibBin E:\tdlib\install\bin -CrtDir E:\vsst\VC\Redist\MSVC\14.51.36231\x64\Microsoft.VC145.CRT -LicenseDir "E:\telegram rust\target-release\dist\Veygram-0.1.0-windows-x64\licenses"
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$TdlibBin,
     [Parameter(Mandatory = $true)][string]$CrtDir,
-    # vcpkg share directory with openssl\copyright and zlib\copyright.
+    # vcpkg share directory or directory containing OpenSSL.txt/copyright and zlib.txt/copyright.
     [Parameter(Mandatory = $true)][string]$LicenseDir,
-    [string]$Out = ''
+    [string]$Out = '',
+    [string]$TargetDir = '',
+    [string]$Iscc = ''
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-if (-not $Out) { $Out = Join-Path $root 'target-release\dist' }
+
+if (-not $TargetDir) {
+    if ($env:CARGO_TARGET_DIR -and (Test-Path (Split-Path $env:CARGO_TARGET_DIR))) {
+        $TargetDir = Join-Path (Split-Path $env:CARGO_TARGET_DIR) 'target-release'
+    } else {
+        $TargetDir = Join-Path $root 'target-release'
+    }
+}
+if (-not $Out) { $Out = Join-Path $TargetDir 'dist' }
 
 $manifest = Get-Content (Join-Path $root 'crates\app\Cargo.toml') -Raw
 $versionLine = [regex]::Match($manifest, '(?m)^version\s*=\s*"([^"]+)"')
@@ -47,11 +58,19 @@ foreach ($name in $tdlibFiles) {
 foreach ($name in $crtFiles) {
     if (-not (Test-Path (Join-Path $CrtDir $name))) { throw "Missing $name in $CrtDir" }
 }
+
+$openSsl = Join-Path $LicenseDir 'openssl\copyright'
+if (-not (Test-Path $openSsl)) { $openSsl = Join-Path $LicenseDir 'OpenSSL.txt' }
+$zlib = Join-Path $LicenseDir 'zlib\copyright'
+if (-not (Test-Path $zlib)) { $zlib = Join-Path $LicenseDir 'zlib.txt' }
+$tdlibLic = Join-Path (Split-Path -Parent (Split-Path -Parent $TdlibBin)) 'td\LICENSE_1_0.txt'
+if (-not (Test-Path $tdlibLic)) { $tdlibLic = Join-Path $LicenseDir 'TDLib-BSL-1.0.txt' }
+
 $licenses = @{
     'Veygram-GPL-3.0.txt' = Join-Path $root 'LICENSE'
-    'TDLib-BSL-1.0.txt' = Join-Path (Split-Path -Parent (Split-Path -Parent $TdlibBin)) 'td\LICENSE_1_0.txt'
-    'OpenSSL.txt' = Join-Path $LicenseDir 'openssl\copyright'
-    'zlib.txt' = Join-Path $LicenseDir 'zlib\copyright'
+    'TDLib-BSL-1.0.txt'   = $tdlibLic
+    'OpenSSL.txt'         = $openSsl
+    'zlib.txt'            = $zlib
 }
 foreach ($source in $licenses.Values) {
     if (-not (Test-Path $source)) { throw "Missing license text $source" }
@@ -75,17 +94,34 @@ foreach ($line in Get-Content $envFile) {
 }
 if (-not $id -or -not $hash) { throw '.env must contain TG_API_ID and TG_API_HASH.' }
 
-$target = Join-Path $root 'target-release'
+$target = $TargetDir
 $env:VEYGRAM_BUILD_API_ID = $id
 $env:VEYGRAM_BUILD_API_HASH = $hash
 $previousTarget = $env:CARGO_TARGET_DIR
 $env:CARGO_TARGET_DIR = $target
+
+# Ensure MSVC dev environment is initialized if link.exe is not in PATH
+if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
+    $vcvars = 'E:\vsst\VC\Auxiliary\Build\vcvars64.bat'
+    if (-not (Test-Path $vcvars)) {
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+        if (Test-Path $vswhere) {
+            $vsPath = & $vswhere -latest -products * -property installationPath
+            if ($vsPath) { $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat' }
+        }
+    }
+} else {
+    $vcvars = $null
+}
+
 try {
     Push-Location $root
-    # PowerShell 5.1 turns cargo's progress on stderr into errors under 'Stop'; the exit
-    # code decides instead.
     $ErrorActionPreference = 'Continue'
-    & cargo build --release -p tg-app --locked 2>&1 | ForEach-Object { "$_" }
+    if ($vcvars -and (Test-Path $vcvars)) {
+        cmd /c "call `"$vcvars`" && cargo build --release -p tg-app --locked" 2>&1 | ForEach-Object { "$_" }
+    } else {
+        & cargo build --release -p tg-app --locked 2>&1 | ForEach-Object { "$_" }
+    }
     $code = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     if ($code -ne 0) { throw "cargo build failed with exit code $code" }
@@ -132,5 +168,29 @@ if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path $stage -DestinationPath $zip
 $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
 Set-Content -Path "$zip.sha256" -Value "$sha  $name.zip" -Encoding ASCII
-Write-Host "Release: $zip"
-Write-Host "SHA-256: $sha"
+Write-Host "Portable archive: $zip"
+Write-Host "Portable SHA-256: $sha"
+
+# Build Inno Setup installer if available
+if (-not $Iscc) {
+    $candidates = @(
+        'C:\Users\tikho\AppData\Local\Programs\Inno Setup 6\ISCC.exe',
+        (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
+        (Join-Path ${env:ProgramFiles} 'Inno Setup 6\ISCC.exe')
+    )
+    foreach ($cand in $candidates) {
+        if (Test-Path $cand) { $Iscc = $cand; break }
+    }
+}
+$issFile = Join-Path $PSScriptRoot 'Veygram.iss'
+if ($Iscc -and (Test-Path $Iscc) -and (Test-Path $issFile)) {
+    Write-Host "Building installer with Inno Setup..."
+    & $Iscc "/DAppVersion=$version" "/DSourceDir=$root" "/DStageDir=$stage" "/DOutputDir=$Out" $issFile
+    $installerExe = Join-Path $Out "Veygram-Setup-$version-x64.exe"
+    if (Test-Path $installerExe) {
+        $installerSha = (Get-FileHash $installerExe -Algorithm SHA256).Hash.ToLowerInvariant()
+        Set-Content -Path "$installerExe.sha256" -Value "$installerSha  Veygram-Setup-$version-x64.exe" -Encoding ASCII
+        Write-Host "Installer: $installerExe"
+        Write-Host "Installer SHA-256: $installerSha"
+    }
+}
