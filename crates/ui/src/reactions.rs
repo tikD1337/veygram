@@ -168,6 +168,19 @@ pub(crate) struct Quick {
 impl Quick {
     /// Prepares the strip for the message row `key`: rasters at the current scale and the
     /// chosen marks of that message. Returns whether the message can get reactions.
+    /// After a reaction update: when the open menu's row `key` belongs to `message`, redraws
+    /// the chosen marks from the new list and returns whether the row can still react.
+    /// Otherwise the strip stays as it is and `None` is returned.
+    pub fn refresh(
+        &self,
+        feed: &Feed,
+        key: MessageId,
+        chat: ChatId,
+        message: MessageId,
+    ) -> Option<bool> {
+        let owner = feed.reaction_state(key).map(|(c, m, _)| (c, m));
+        (owner == Some((chat, message))).then(|| self.open(feed, key))
+    }
     pub fn open(&self, feed: &Feed, key: MessageId) -> bool {
         let scale = feed.scale.get();
         if self.scale.replace(scale) != scale || self.model.row_count() != QUICK.len() {
@@ -244,6 +257,16 @@ impl State {
         }
         self.feed.invalidate_message(message);
         self.refresh(w);
+        // An open menu must not keep its opening snapshot: a click on a mark that is out of
+        // date would toggle the reaction the other way.
+        if w.get_menu_open()
+            && let Ok(key) = w.get_menu_key().parse::<i64>()
+            && let Some(can) = self
+                .quick
+                .refresh(&self.feed, MessageId(key), chat, message)
+        {
+            w.set_menu_can_react(can);
+        }
     }
 }
 
@@ -272,6 +295,55 @@ pub(super) fn bind(window: &AppWindow, state: &Rc<State>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reacted(n: i64, chosen: bool) -> Message {
+        Message {
+            attachment: None,
+            reply: None,
+            forwarded: None,
+            edited: false,
+            is_text: true,
+            service: false,
+            permissions: None,
+            video: None,
+            photo: None,
+            id: MessageId(n * 1048576),
+            chat: ChatId(1),
+            date: n as i32,
+            outgoing: false,
+            text: "Text".into(),
+            entities: vec![],
+            send_state: tg_core::SendState::Sent,
+            album: 0,
+            sender_id: 0,
+            sender: None,
+            reactions: vec![Reaction {
+                emoji: "👍".into(),
+                count: 1,
+                chosen,
+            }],
+        }
+    }
+
+    #[test]
+    fn an_open_strip_follows_updates_of_its_own_message_only() {
+        let feed = Feed::new(None);
+        feed.history.borrow_mut().messages = vec![reacted(1, false), reacted(2, false)];
+        let quick = Quick::default();
+        let key = MessageId(1048576);
+        assert!(quick.open(&feed, key));
+        let thumbs = |quick: &Quick| quick.model.row_data(0).is_some_and(|q| q.chosen);
+        assert!(!thumbs(&quick));
+        // The toggle comes back after the menu opened (or another device changed it).
+        feed.history.borrow_mut().messages[0].reactions[0].chosen = true;
+        assert_eq!(quick.refresh(&feed, key, ChatId(1), key), Some(true));
+        assert!(thumbs(&quick));
+        // An update of another message leaves the open strip alone.
+        feed.history.borrow_mut().messages[0].reactions[0].chosen = false;
+        let other = MessageId(2 * 1048576);
+        assert_eq!(quick.refresh(&feed, key, ChatId(1), other), None);
+        assert!(thumbs(&quick));
+    }
 
     #[test]
     fn counters_are_shortened_like_telegram_desktop() {
