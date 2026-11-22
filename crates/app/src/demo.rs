@@ -589,10 +589,14 @@ impl Demo {
         changes.entries.insert((m.chat, m.id), Some(m));
         Ok(())
     }
-    pub fn schedule_incoming(&self) {
+    pub fn schedule_incoming(&mut self) {
         let Some(sink) = self.sink.clone() else {
             return;
         };
+        // Reserved from the local-message sequence now, so a text sent before the arrival
+        // gets the next ID instead of this one.
+        self.sent += 1;
+        let sequence = self.sent;
         let chats = self.chats.clone();
         let changes = self.changes.clone();
         // One demo-only arrival, three seconds after startup; no periodic notification timer.
@@ -610,8 +614,8 @@ impl Demo {
                     permissions: None,
                     video: None,
                     chat: ChatId(3),
-                    id: MessageId(20001 * 1048576),
-                    date: BASE_DATE + 20001 * 60,
+                    id: MessageId(sequence * 1048576),
+                    date: BASE_DATE + sequence as i32 * 60,
                     outgoing: false,
                     text: "A synthetic desktop notification has arrived.".into(),
                     sender: Some("Anna Petrova".into()),
