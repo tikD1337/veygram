@@ -98,33 +98,31 @@ impl Shared {
     }
 
     /// Starts a reaction toggle, or holds it while an earlier one for the same message runs.
-    /// Never waits on the mutex: a contended lock is reported as a capacity error.
+    /// Admission, the first send and its rollback are one nonblocking step: the lock is only
+    /// tried, and it stays held across `send_value` (which takes no other lock for a read and
+    /// never waits), so the entry inserted here is still empty if the send fails.
     fn toggle(&self, request: Value) -> Result<(), CommandError> {
         let key = toggle_key(&request["@extra"])?;
-        {
-            let mut toggles = self
-                .toggles
-                .try_lock()
-                .map_err(|_| error(-3, "A reaction change is being processed. Try again."))?;
-            if let Some(held) = toggles.get_mut(&key) {
-                if held.len() >= MAX_HELD_TOGGLES {
-                    return Err(error(
-                        -3,
-                        "Too many reaction changes are pending for this message.",
-                    ));
-                }
-                held.push_back(request);
-                return Ok(());
+        let mut toggles = self
+            .toggles
+            .try_lock()
+            .map_err(|_| error(-3, "A reaction change is being processed. Try again."))?;
+        if let Some(held) = toggles.get_mut(&key) {
+            if held.len() >= MAX_HELD_TOGGLES {
+                return Err(error(
+                    -3,
+                    "Too many reaction changes are pending for this message.",
+                ));
             }
-            if toggles.len() >= MAX_TOGGLED_MESSAGES {
-                return Err(error(-3, "Too many reaction changes are pending."));
-            }
-            toggles.insert(key, VecDeque::new());
+            held.push_back(request);
+            return Ok(());
         }
-        self.send_value(request).inspect_err(|_| {
-            // Nothing of this message is in flight: let a held toggle run or free the slot.
-            let _ = self.advance_toggle(key);
-        })
+        if toggles.len() >= MAX_TOGGLED_MESSAGES {
+            return Err(error(-3, "Too many reaction changes are pending."));
+        }
+        self.send_value(request)?;
+        toggles.insert(key, VecDeque::new());
+        Ok(())
     }
 
     /// The toggle of `key` finished (mutation answered, or failed before it): send the next
@@ -689,6 +687,30 @@ mod tests {
                 {"type":{"@type":"reactionTypeEmoji","emoji":"👍"},
                 "total_count":1,"is_chosen":chosen}]}}})
         .to_string()
+    }
+
+    #[test]
+    fn toggle_admission_never_waits_and_leaves_nothing_behind_on_failure() {
+        let (shared, requests, _) = fake_shared();
+        let toggle = || request::encode(toggle_command()).unwrap();
+        // TDLib request slots are full: the first send fails and no entry remains.
+        shared.in_flight.store(MAX_IN_FLIGHT, Ordering::Release);
+        assert_eq!(shared.toggle(toggle()).unwrap_err().code, -3);
+        assert!(shared.toggles.lock().unwrap().is_empty());
+        assert!(requests.try_recv().is_err());
+        // The receive thread holds the lock: the UI gets an error at once instead of waiting.
+        shared.in_flight.store(0, Ordering::Release);
+        let guard = shared.toggles.lock().unwrap();
+        assert_eq!(shared.toggle(toggle()).unwrap_err().code, -3);
+        drop(guard);
+        assert!(requests.try_recv().is_err());
+        // With a free slot and lock the toggle starts and its message is tracked.
+        shared.toggle(toggle()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&requests.recv().unwrap()).unwrap()["@type"],
+            "getMessage"
+        );
+        assert_eq!(shared.toggles.lock().unwrap().len(), 1);
     }
 
     #[test]
