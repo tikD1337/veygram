@@ -563,8 +563,10 @@ claims of completed functionality.
   commit, release notes on GitHub Releases, Veygram's own API credentials (SECURITY.md).
 - Done 2026-11-19: release v0.1.0 published as an installer, `Veygram-Setup-0.1.0-x64.exe`, with
   its SHA-256 in the release notes. The installer is built outside this repository.
-- A reproducible installer build in the repository, code signing (SmartScreen warns today) and
-  automatic updates.
+- Done 2026-11-22: release v0.2.0 published with both an installer (`Veygram-Setup-0.2.0-x64.exe`)
+  and portable archive (`Veygram-0.2.0-windows-x64.zip`), with a reproducible Inno Setup installer
+  build in the repository (`scripts/Veygram.iss`, `scripts/package-release.ps1`).
+- Code signing (SmartScreen warns today) and automatic updates.
 - Verify the published TDLib hash in the packaging script instead of trusting the local build.
 
 

@@ -270,8 +270,9 @@ These are hypotheses. Each is validated by before and after measurements.
   `tdjson.dll` from its own folder, otherwise from the TDLib installation it was built against.
   Veygram's own `api_id`/`api_hash` are built into release executables only; development builds
   read `.env`. Release v0.1.0 (2026-11-19) was published as an installer,
-  `Veygram-Setup-<version>-x64.exe`, built outside this repository; a reproducible installer
-  build, an uninstaller, code signing and automatic updates are later steps.
+  `Veygram-Setup-<version>-x64.exe`, built outside this repository. Release v0.2.0 (2026-11-22)
+  adds a reproducible Inno Setup packaging script (`scripts/Veygram.iss`) directly in the repository,
+  shipping both portable ZIP and Windows installer packages. Code signing and automatic updates are later steps.
 
 ## 9. Decisions of 2026-11-20
 
