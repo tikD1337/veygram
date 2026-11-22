@@ -102,6 +102,10 @@ impl Shared {
     /// tried, and it stays held across `send_value` (which takes no other lock for a read and
     /// never waits), so the entry inserted here is still empty if the send fails.
     fn toggle(&self, request: Value) -> Result<(), CommandError> {
+        // A held toggle could never run once closing starts: refuse it as send_value would.
+        if self.closing.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
+            return Err(error(-2, "The engine is closing or closed."));
+        }
         let key = toggle_key(&request["@extra"])?;
         let mut toggles = self
             .toggles
@@ -624,53 +628,27 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn toggling_a_reaction_reads_the_message_then_adds_or_removes_it() {
+    /// An engine on the fake transport whose events arrive on a channel, so a test can wait
+    /// until the receive thread has finished an answer before it sends the next command.
+    fn spawn_engine() -> (
+        Engine,
+        mpsc::Receiver<String>,
+        mpsc::SyncSender<String>,
+        mpsc::Receiver<Event>,
+    ) {
         let (shared, requests, updates) = fake_shared();
+        let (events, received) = mpsc::sync_channel(130);
         let running = shared.clone();
-        let thread = std::thread::spawn(move || run(running, None, |_| {}));
+        let thread = std::thread::spawn(move || {
+            run(running, None, move |event| {
+                let _ = events.try_send(event);
+            })
+        });
         let engine = Engine {
             shared,
             thread: Some(thread),
         };
-        for (chosen, expected) in [
-            (false, "addMessageReaction"),
-            (true, "removeMessageReaction"),
-        ] {
-            engine
-                .send(Command::ToggleReaction {
-                    chat: ChatId(7),
-                    message: MessageId(1048576),
-                    reaction: "👍".into(),
-                })
-                .unwrap();
-            let get: Value = serde_json::from_str(&requests.recv().unwrap()).unwrap();
-            assert_eq!(get["@type"], "getMessage");
-            updates
-                .send(
-                    json!({"@type":"message","@client_id":7,"@extra":get["@extra"],
-                    "id":1048576,"chat_id":7,"interaction_info":{"reactions":{"reactions":[
-                        {"type":{"@type":"reactionTypeEmoji","emoji":"👍"},
-                        "total_count":1,"is_chosen":chosen}]}}})
-                    .to_string(),
-                )
-                .unwrap();
-            let change: Value = serde_json::from_str(&requests.recv().unwrap()).unwrap();
-            assert_eq!(change["@type"], expected);
-            assert_eq!(change["chat_id"], 7);
-            assert_eq!(change["message_id"], 1048576);
-            assert_eq!(change["reaction_type"]["emoji"], "👍");
-            updates
-                .send(json!({"@type":"ok","@client_id":7,"@extra":change["@extra"]}).to_string())
-                .unwrap();
-        }
-        engine.send(Command::ShutDown).unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(&requests.recv().unwrap()).unwrap()["@type"],
-            "close"
-        );
-        updates.send(r#"{"@type":"updateAuthorizationState","@client_id":7,"authorization_state":{"@type":"authorizationStateClosed"}}"#.into()).unwrap();
-        engine.shutdown().unwrap();
+        (engine, requests, updates, received)
     }
 
     fn toggle_command() -> Command {
@@ -687,6 +665,84 @@ mod tests {
                 {"type":{"@type":"reactionTypeEmoji","emoji":"👍"},
                 "total_count":1,"is_chosen":chosen}]}}})
         .to_string()
+    }
+
+    /// Answers a request and waits until the receive thread has processed the answer: an
+    /// error is awaited as its failure event; after `ok`, an interaction update follows and
+    /// its event marks that everything before it (in order) is done.
+    fn answer_and_settle(
+        updates: &mpsc::SyncSender<String>,
+        events: &mpsc::Receiver<Event>,
+        request: &Value,
+        ok: bool,
+    ) {
+        if ok {
+            updates
+                .send(json!({"@type":"ok","@client_id":7,"@extra":request["@extra"]}).to_string())
+                .unwrap();
+            updates
+                .send(
+                    json!({"@type":"updateMessageInteractionInfo","@client_id":7,"chat_id":7,
+                    "message_id":1048576,"interaction_info":null})
+                    .to_string(),
+                )
+                .unwrap();
+        } else {
+            updates
+                .send(
+                    json!({"@type":"error","@client_id":7,"code":400,"message":"x",
+                    "@extra":request["@extra"]})
+                    .to_string(),
+                )
+                .unwrap();
+        }
+        loop {
+            match events.recv().unwrap() {
+                Event::MessageReactionsChanged { .. } if ok => break,
+                Event::CommandFailed {
+                    command: CommandKind::ToggleReaction,
+                    ..
+                } if !ok => break,
+                _ => {}
+            }
+        }
+    }
+
+    fn close_engine(
+        engine: Engine,
+        requests: &mpsc::Receiver<String>,
+        updates: &mpsc::SyncSender<String>,
+    ) {
+        engine.send(Command::ShutDown).unwrap();
+        loop {
+            let request: Value = serde_json::from_str(&requests.recv().unwrap()).unwrap();
+            if request["@type"] == "close" {
+                break;
+            }
+        }
+        updates.send(r#"{"@type":"updateAuthorizationState","@client_id":7,"authorization_state":{"@type":"authorizationStateClosed"}}"#.into()).unwrap();
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn toggling_a_reaction_reads_the_message_then_adds_or_removes_it() {
+        let (engine, requests, updates, events) = spawn_engine();
+        for (chosen, expected) in [
+            (false, "addMessageReaction"),
+            (true, "removeMessageReaction"),
+        ] {
+            engine.send(toggle_command()).unwrap();
+            let get: Value = serde_json::from_str(&requests.recv().unwrap()).unwrap();
+            assert_eq!(get["@type"], "getMessage");
+            updates.send(answer_with(&get, chosen)).unwrap();
+            let change: Value = serde_json::from_str(&requests.recv().unwrap()).unwrap();
+            assert_eq!(change["@type"], expected);
+            assert_eq!(change["chat_id"], 7);
+            assert_eq!(change["message_id"], 1048576);
+            assert_eq!(change["reaction_type"]["emoji"], "👍");
+            answer_and_settle(&updates, &events, &change, true);
+        }
+        close_engine(engine, &requests, &updates);
     }
 
     #[test]
@@ -711,25 +767,17 @@ mod tests {
             "getMessage"
         );
         assert_eq!(shared.toggles.lock().unwrap().len(), 1);
+        // Once closing starts, a toggle of the same message is refused, not held forever.
+        shared.close();
+        let refused = shared.toggle(toggle()).unwrap_err();
+        assert_eq!(refused.code, -2);
+        assert_eq!(refused.message, "The engine is closing or closed.");
+        assert!(shared.toggles.lock().unwrap()[&(7, 1048576)].is_empty());
     }
 
     #[test]
     fn quick_toggles_of_one_message_run_one_after_another() {
-        let (shared, requests, updates) = fake_shared();
-        let running = shared.clone();
-        let failures = Arc::new(Mutex::new(Vec::new()));
-        let seen = failures.clone();
-        let thread = std::thread::spawn(move || {
-            run(running, None, move |event| {
-                if let Event::CommandFailed { command, .. } = event {
-                    seen.lock().unwrap().push(command);
-                }
-            })
-        });
-        let engine = Engine {
-            shared,
-            thread: Some(thread),
-        };
+        let (engine, requests, updates, events) = spawn_engine();
         let next = || serde_json::from_str::<Value>(&requests.recv().unwrap()).unwrap();
         // Two clicks before TDLib answers: only the first read goes out.
         engine.send(toggle_command()).unwrap();
@@ -744,33 +792,20 @@ mod tests {
             requests.try_recv().is_err(),
             "the held toggle waits for the mutation"
         );
-        updates
-            .send(json!({"@type":"ok","@client_id":7,"@extra":add["@extra"]}).to_string())
-            .unwrap();
+        answer_and_settle(&updates, &events, &add, true);
         // The held toggle now reads the state the add left and takes it back.
         let get = next();
         assert_eq!(get["@type"], "getMessage");
         updates.send(answer_with(&get, true)).unwrap();
         let remove = next();
         assert_eq!(remove["@type"], "removeMessageReaction");
-        updates
-            .send(
-                json!({"@type":"error","@client_id":7,"code":400,"message":"x",
-                "@extra":remove["@extra"]})
-                .to_string(),
-            )
-            .unwrap();
+        // A failed mutation releases the message.
+        answer_and_settle(&updates, &events, &remove, false);
 
-        // A failed read releases the message: the next toggle starts at once.
+        // A failed read releases the message too: the next toggle starts at once.
         engine.send(toggle_command()).unwrap();
         let get = next();
-        updates
-            .send(
-                json!({"@type":"error","@client_id":7,"code":400,"message":"x",
-                "@extra":get["@extra"]})
-                .to_string(),
-            )
-            .unwrap();
+        answer_and_settle(&updates, &events, &get, false);
         engine.send(toggle_command()).unwrap();
         let get = next();
         assert_eq!(get["@type"], "getMessage");
@@ -780,16 +815,7 @@ mod tests {
         }
         assert_eq!(engine.send(toggle_command()).unwrap_err().code, -3);
         assert!(requests.try_recv().is_err());
-
-        engine.send(Command::ShutDown).unwrap();
-        assert_eq!(next()["@type"], "close");
-        updates.send(r#"{"@type":"updateAuthorizationState","@client_id":7,"authorization_state":{"@type":"authorizationStateClosed"}}"#.into()).unwrap();
-        engine.shutdown().unwrap();
-        // Both TDLib errors reached the UI as toggle failures.
-        assert_eq!(
-            *failures.lock().unwrap(),
-            vec![CommandKind::ToggleReaction, CommandKind::ToggleReaction]
-        );
+        close_engine(engine, &requests, &updates);
     }
 
     #[test]
