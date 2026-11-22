@@ -24,6 +24,14 @@ export global Theme {
     out property <color> badge-muted: #637383;
     out property <color> accent-wash: #6ab3f312;
     out property <color> highlight: #386080;
+    // Reaction chips: a wash of the accent (incoming) or of white (outgoing); a chosen chip is
+    // filled with the accent and its count takes the bubble colour, as in Telegram Desktop.
+    out property <color> reaction-in: #6ab3f326;
+    out property <color> reaction-in-hover: #6ab3f340;
+    out property <color> reaction-out: #ffffff1f;
+    out property <color> reaction-out-hover: #ffffff33;
+    out property <color> reaction-out-text: #e4f0fc;
+    out property <color> reaction-picked: #6ab3f333;
     // Popover surfaces sit one step above the panel; their edge is a faint light line.
     out property <color> menu: oled ? #121212 : #1d2733;
     out property <color> menu-hover: #ffffff12;
@@ -66,6 +74,9 @@ export global Theme {
 export struct ChatRow { avatar: image, initials: string, color: color, title: string, preview: string, time: string, unread: string, mentions: string, muted: bool, selected: bool }
 export struct WaveBar { amplitude: length, played: bool }
 export struct PhotoCell { raster-width: length, raster-height: length, image: image, label: string, x: length, y: length, width: length, height: length, video: bool, duration: string }
+// A reaction chip; x and y are relative to the reaction block, its height is 26 px.
+export struct ReactionChip { x: length, y: length, width: length, emoji: image, count: string, chosen: bool, reaction: string }
+export struct QuickReaction { emoji: image, reaction: string, chosen: bool }
 // One feed row: a date separator (optional) and one bubble holding a message or an album.
 export struct MessageRow {
     voice: bool, voice-playing: bool, voice-unlistened: bool, voice-time: string, waveform: [WaveBar],
@@ -86,6 +97,7 @@ export struct MessageRow {
     time: string, time-x: length, time-y: length, time-over-media: bool,
     // 0 none, 1 sent, 2 read, -1 sending, -2 failed.
     checks: int,
+    reactions: [ReactionChip], reactions-y: length, can-react: bool,
 }
 // Hit testing is a pure binding to pointer coordinates: no timers or reshaping on hover.
 component MessageText inherits Image {
@@ -341,6 +353,12 @@ export component AppWindow inherits Window {
     callback latest();
     // Action IDs: 0 reply, 1 edit, 2 copy, 3 forward, 4 delete, 5 open quote.
     callback message-action(key: string, action: int);
+    // Toggles a reaction on the row's message; the engine adds or removes it.
+    callback react(key: string, reaction: string);
+    // Fills `quick-reactions` and `menu-can-react` for the row whose menu opens.
+    callback menu-opened(key: string);
+    in property <[QuickReaction]> quick-reactions;
+    in-out property <bool> menu-can-react;
     // In-window message menu (see the comment at the message bubble).
     in-out property <bool> menu-open;
     changed menu-open => { root.viewport-changed(); }
@@ -361,6 +379,8 @@ export component AppWindow inherits Window {
         root.menu-can-reveal = reveal;
         root.menu-x = x;
         root.menu-y = y;
+        root.menu-can-react = false;
+        root.menu-opened(key);
         root.menu-open = true;
     }
     function menu-pick(action: int) {
@@ -709,6 +729,26 @@ export component AppWindow inherits Window {
                                             root.open-menu(msg.key, msg.can-reply, msg.can-edit, msg.can-forward, msg.can-delete, msg.file-available, x, y);
                                         }
                                     }
+                                    for chip in msg.reactions: Rectangle {
+                                        x: 10px + chip.x; y: msg.reactions-y + chip.y; width: chip.width; height: 26px;
+                                        border-radius: self.height / 2;
+                                        background: chip.chosen ? Theme.accent
+                                            : msg.sticker ? Theme.date
+                                            : msg.outgoing ? (chip-touch.has-hover ? Theme.reaction-out-hover : Theme.reaction-out)
+                                            : (chip-touch.has-hover ? Theme.reaction-in-hover : Theme.reaction-in);
+                                        Image { x: 8px; y: 4px; width: 18px; height: 18px; source: chip.emoji; image-fit: contain; }
+                                        Text {
+                                            x: 30px; width: parent.width - 38px; height: parent.height; text: chip.count;
+                                            font-size: Theme.type-meta; font-weight: 600; vertical-alignment: center;
+                                            color: chip.chosen ? (msg.outgoing ? Theme.outgoing : Theme.incoming)
+                                                : msg.outgoing ? Theme.reaction-out-text : msg.sticker ? Theme.text : Theme.accent;
+                                        }
+                                        chip-touch := TouchArea {
+                                            enabled: msg.can-react && !root.blocked && root.action-dialog == 0;
+                                            mouse-cursor: MouseCursor.pointer;
+                                            clicked => { root.react(msg.key, chip.reaction); }
+                                        }
+                                    }
                                     if msg.time-over-media: Rectangle {
                                         x: msg.time-x - 6px; y: msg.time-y - 2px; height: 18px; border-radius: self.height / 2; background: Theme.scrim;
                                         width: msg.time-label-width + (msg.checks != 0 ? 18px : 0px) + 12px;
@@ -960,10 +1000,11 @@ export component AppWindow inherits Window {
                 return reject;
             }
         }
-        Rectangle {
+        // Quick reactions float above the menu, as in Telegram Desktop.
+        menu-panel := Rectangle {
             width: 210px; height: items.preferred-height;
             x: min(root.menu-x, root.width - self.width - 8px);
-            y: min(root.menu-y, root.height - self.height - 8px);
+            y: max(root.menu-can-react ? 58px : 8px, min(root.menu-y, root.height - self.height - 8px));
             background: Theme.menu; border-radius: Theme.radius-panel;
             border-width: 1px; border-color: Theme.menu-edge;
             drop-shadow-blur: 16px; drop-shadow-offset-y: 4px; drop-shadow-color: Theme.shadow;
@@ -992,6 +1033,26 @@ export component AppWindow inherits Window {
                 MenuRow {
                     text: "Delete"; enabled: root.menu-can-delete; clicked => { root.menu-pick(4); }
                     icon: "M4 7 H20 M9.5 7 V4.5 H14.5 V7 M6 7 L7 20 H17 L18 7 M10 11 V16.5 M14 11 V16.5";
+                }
+            }
+        }
+        if root.menu-can-react: Rectangle {
+            width: root.quick-reactions.length * 36px + 12px; height: 44px;
+            x: max(8px, min(menu-panel.x, root.width - self.width - 8px));
+            y: menu-panel.y - self.height - 6px;
+            background: Theme.menu; border-radius: self.height / 2;
+            border-width: 1px; border-color: Theme.menu-edge;
+            drop-shadow-blur: 16px; drop-shadow-offset-y: 4px; drop-shadow-color: Theme.shadow;
+            for quick[index] in root.quick-reactions: Rectangle {
+                x: 6px + index * 36px; y: 4px; width: 36px; height: 36px; border-radius: self.height / 2;
+                background: quick.chosen ? Theme.reaction-picked : quick-touch.has-hover ? Theme.menu-hover : transparent;
+                Image { x: 5px; y: 5px; width: 26px; height: 26px; source: quick.emoji; image-fit: contain; }
+                quick-touch := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        root.menu-open = false;
+                        root.react(root.menu-key, quick.reaction);
+                    }
                 }
             }
         }

@@ -177,6 +177,22 @@ impl Demo {
                     edited: true,
                 });
             }
+            Command::ToggleReaction {
+                chat,
+                message,
+                reaction,
+            } => {
+                let Some(mut m) = self.lookup(chat, message) else {
+                    return Err(action_error());
+                };
+                toggle_reaction(&mut m.reactions, &reaction);
+                self.remember(m.clone())?;
+                sink.post(Event::MessageReactionsChanged {
+                    chat,
+                    message,
+                    reactions: m.reactions,
+                });
+            }
             Command::DeleteMessages { chat, messages, .. } => {
                 if messages.is_empty() || messages.len() > 10 {
                     return Err(action_error());
@@ -573,11 +589,16 @@ impl Demo {
         changes.entries.insert((m.chat, m.id), Some(m));
         Ok(())
     }
-    pub fn schedule_incoming(&self) {
+    pub fn schedule_incoming(&mut self) {
         let Some(sink) = self.sink.clone() else {
             return;
         };
+        // Reserved from the local-message sequence now, so a text sent before the arrival
+        // gets the next ID instead of this one.
+        self.sent += 1;
+        let sequence = self.sent;
         let chats = self.chats.clone();
+        let changes = self.changes.clone();
         // One demo-only arrival, three seconds after startup; no periodic notification timer.
         let _ = std::thread::Builder::new()
             .name("tg-demo-incoming".into())
@@ -593,8 +614,8 @@ impl Demo {
                     permissions: None,
                     video: None,
                     chat: ChatId(3),
-                    id: MessageId(20001 * 1048576),
-                    date: BASE_DATE + 20001 * 60,
+                    id: MessageId(sequence * 1048576),
+                    date: BASE_DATE + sequence as i32 * 60,
                     outgoing: false,
                     text: "A synthetic desktop notification has arrived.".into(),
                     sender: Some("Anna Petrova".into()),
@@ -603,7 +624,16 @@ impl Demo {
                     photo: None,
                     entities: vec![],
                     send_state: SendState::Sent,
+                    reactions: Vec::new(),
                 };
+                // Stored like a sent message, so actions such as reactions can find it.
+                if let Ok(mut changes) = changes.lock()
+                    && changes.entries.len() < 512
+                {
+                    changes
+                        .entries
+                        .insert((message.chat, message.id), Some(message.clone()));
+                }
                 if let Ok(mut chats) = chats.lock()
                     && let Some(chat) = chats.iter_mut().find(|c| c.id == message.chat)
                 {
@@ -840,7 +870,7 @@ fn page(chat: ChatId, before: MessageId, newer: bool) -> Event {
         for entity in &mut entities { entity.offset+=prefix.len() as u32; }
         let outgoing = id % 3 == 0;
         let sender_id = if outgoing { 0 } else { 1000 + (id / 4) % 3 };
-        let mut message = Message { attachment: None, video: None, reply: (id%6==4).then(||tg_core::Reply {resolved:true,chat,message:MessageId((id-3).max(1)*1048576),sender_id:1000,sender:"Anna Petrova".into(),preview:"Earlier synthetic message".into()}), forwarded: (id%9==0).then(||"Design review".into()), edited: outgoing && id%15==0, is_text: true, service: false, permissions: None, album: 0, sender_id, sender: (!outgoing).then(|| NAMES[(sender_id - 1000) as usize].to_owned()), photo: None, id: MessageId(id*1048576), chat, date: BASE_DATE + id as i32 * 60, outgoing, text: format!("{prefix}{text}{}", if id % 11 == 0 { " Long messages wrap at the current bubble width. We keep reading the same line while pages arrive above the viewport.".repeat(8) } else { String::new() }), entities, send_state: SendState::Sent };
+        let mut message = Message { attachment: None, video: None, reply: (id%6==4).then(||tg_core::Reply {resolved:true,chat,message:MessageId((id-3).max(1)*1048576),sender_id:1000,sender:"Anna Petrova".into(),preview:"Earlier synthetic message".into()}), forwarded: (id%9==0).then(||"Design review".into()), edited: outgoing && id%15==0, is_text: true, service: false, permissions: None, album: 0, sender_id, sender: (!outgoing).then(|| NAMES[(sender_id - 1000) as usize].to_owned()), photo: None, id: MessageId(id*1048576), chat, date: BASE_DATE + id as i32 * 60, outgoing, text: format!("{prefix}{text}{}", if id % 11 == 0 { " Long messages wrap at the current bubble width. We keep reading the same line while pages arrive above the viewport.".repeat(8) } else { String::new() }), entities, send_state: SendState::Sent, reactions: demo_reactions(id) };
         // A few service messages, drawn as centred pills.
         // Slot 3 of every 20 has no demo attachment (see media_page), so pills never displace one.
         if id % 20 == 3 {
@@ -851,6 +881,7 @@ fn page(chat: ChatId, before: MessageId, newer: bool) -> Event {
             message.forwarded = None;
             message.is_text = false;
             message.service = true;
+            message.reactions.clear();
         }
         message
     }).collect();
@@ -993,6 +1024,54 @@ impl Changes {
         messages.reverse();
     }
 }
+/// Synthetic reactions on some messages: one chip, a chosen pair, or a full row that wraps.
+fn demo_reactions(id: i64) -> Vec<tg_core::Reaction> {
+    let r = |emoji: &str, count: i32, chosen: bool| tg_core::Reaction {
+        emoji: emoji.into(),
+        count,
+        chosen,
+    };
+    match id % 12 {
+        2 => vec![r("👍", (id % 7 + 1) as i32, false)],
+        5 => vec![r("\u{2764}", 2, true), r("🔥", 1, false)],
+        9 if id % 24 == 9 => vec![
+            r("👍", 1234, false),
+            r("😂", 3, false),
+            r("👏", 1, true),
+            r("🎉", 12, false),
+            r("🔥", 25_000, false),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// Local toggle with the non-Premium limit of one chosen reaction, as TDLib applies it.
+fn toggle_reaction(reactions: &mut Vec<tg_core::Reaction>, wanted: &str) {
+    let was_chosen = reactions
+        .iter()
+        .any(|r| r.chosen && tg_core::same_reaction(&r.emoji, wanted));
+    for r in reactions.iter_mut().filter(|r| r.chosen) {
+        r.chosen = false;
+        r.count -= 1;
+    }
+    if !was_chosen {
+        if let Some(r) = reactions
+            .iter_mut()
+            .find(|r| tg_core::same_reaction(&r.emoji, wanted))
+        {
+            r.chosen = true;
+            r.count += 1;
+        } else if reactions.len() < tg_core::MAX_REACTIONS {
+            reactions.push(tg_core::Reaction {
+                emoji: wanted.into(),
+                count: 1,
+                chosen: true,
+            });
+        }
+    }
+    reactions.retain(|r| r.count > 0);
+}
+
 fn action_error() -> tg_core::CommandError {
     tg_core::CommandError {
         code: -4,
@@ -1057,12 +1136,37 @@ fn local_message(chat: ChatId, sequence: i64, text: String) -> Message {
         album: 0,
         sender_id: 0,
         sender: None,
+        reactions: Vec::new(),
     }
 }
 
 #[cfg(test)]
 mod action_tests {
     use super::*;
+    #[test]
+    fn demo_reactions_toggle_with_one_chosen_reaction() {
+        let mut reactions = demo_reactions(5);
+        // The chosen heart is taken back; the picker's spelling carries U+FE0F.
+        toggle_reaction(&mut reactions, "\u{2764}\u{FE0F}");
+        assert!(reactions.iter().all(|r| !r.chosen));
+        assert_eq!(reactions[0].count, 1);
+        // A new reaction replaces nothing chosen and appears with one vote.
+        toggle_reaction(&mut reactions, "🎉");
+        assert!(
+            reactions
+                .iter()
+                .any(|r| r.emoji == "🎉" && r.chosen && r.count == 1)
+        );
+        // Choosing another one drops the previous choice; an emptied chip disappears.
+        toggle_reaction(&mut reactions, "🔥");
+        assert!(reactions.iter().all(|r| r.emoji != "🎉"));
+        assert!(
+            reactions
+                .iter()
+                .any(|r| r.emoji == "🔥" && r.chosen && r.count == 2)
+        );
+        assert!(demo_reactions(1).is_empty());
+    }
     #[test]
     fn local_changes_survive_reopening_and_deleted_rows_stay_deleted() {
         let mut changes = Changes::default();

@@ -77,7 +77,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let notifications = attach_notifications(&ui);
         let player = attach_video(&ui);
         let _files = files::attach(&ui);
-        backend.borrow().schedule_incoming();
+        backend.borrow_mut().schedule_incoming();
         let result = ui.run();
         drop(player);
         drop(notifications);

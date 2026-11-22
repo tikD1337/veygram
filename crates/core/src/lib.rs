@@ -15,8 +15,10 @@ mod command;
 mod event;
 mod ids;
 mod links;
+mod reactions;
 mod secret;
 pub use links::external_url;
+pub use reactions::{MAX_REACTION_BYTES, MAX_REACTIONS, Reaction, same_reaction, valid_reaction};
 
 pub use command::{Command, CommandKind};
 pub use event::{

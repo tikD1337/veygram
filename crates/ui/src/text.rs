@@ -264,40 +264,36 @@ impl TextEngine {
         }
     }
     pub fn render_emoji(&mut self, message: &Message, scale: f32, width: f32) -> Rendered {
-        let mut rendered = self.render_sized(message, scale, width, 120.0);
-        // Emoji rasters are trimmed to painted bounds and are not interactive message text.
-        rendered.links = Links::default();
-        let (mut left, mut top) = (rendered.width, rendered.height);
-        let (mut right, mut bottom) = (0, 0);
-        for (y, row) in rendered
-            .pixels
-            .chunks_exact(rendered.width as usize * 4)
-            .enumerate()
-        {
-            for (x, pixel) in row.as_chunks::<4>().0.iter().enumerate() {
-                if pixel[3] != 0 {
-                    left = left.min(x as u32);
-                    right = right.max(x as u32 + 1);
-                    top = top.min(y as u32);
-                    bottom = bottom.max(y as u32 + 1);
-                }
-            }
-        }
-        if bottom > top && right > left {
-            let mut pixels = Vec::with_capacity(((right - left) * (bottom - top) * 4) as usize);
-            for row in rendered
-                .pixels
-                .chunks_exact(rendered.width as usize * 4)
-                .skip(top as usize)
-                .take((bottom - top) as usize)
-            {
-                pixels.extend_from_slice(&row[(left * 4) as usize..(right * 4) as usize]);
-            }
-            rendered.pixels = pixels;
-            rendered.width = right - left;
-            rendered.height = bottom - top;
-        }
-        rendered
+        let rendered = self.render_sized(message, scale, width, 120.0);
+        trim(rendered)
+    }
+    /// A short plain string (a reaction emoji) at `font_size`, trimmed to its painted bounds.
+    /// At most MAX_REACTION_BYTES of text; the raster is a few kilobytes.
+    pub fn render_symbol(&mut self, text: &str, scale: f32, font_size: f32) -> Rendered {
+        let message = Message {
+            attachment: None,
+            reply: None,
+            forwarded: None,
+            edited: false,
+            is_text: true,
+            service: false,
+            permissions: None,
+            video: None,
+            photo: None,
+            id: tg_core::MessageId(0),
+            chat: tg_core::ChatId(0),
+            date: 0,
+            outgoing: false,
+            text: text.chars().take(tg_core::MAX_REACTION_BYTES).collect(),
+            entities: Vec::new(),
+            send_state: tg_core::SendState::Sent,
+            album: 0,
+            sender_id: 0,
+            sender: None,
+            reactions: Vec::new(),
+        };
+        let rendered = self.render_sized(&message, scale, font_size * 4.0 * scale, font_size);
+        trim(rendered)
     }
     pub fn render(&mut self, message: &Message, scale: f32, width: f32) -> Rendered {
         self.render_sized(message, scale, width, 14.0)
@@ -617,6 +613,41 @@ impl Canvas {
         }
     }
 }
+/// Emoji rasters are trimmed to painted bounds and are not interactive message text.
+fn trim(mut rendered: Rendered) -> Rendered {
+    rendered.links = Links::default();
+    let (mut left, mut top) = (rendered.width, rendered.height);
+    let (mut right, mut bottom) = (0, 0);
+    for (y, row) in rendered
+        .pixels
+        .chunks_exact(rendered.width as usize * 4)
+        .enumerate()
+    {
+        for (x, pixel) in row.as_chunks::<4>().0.iter().enumerate() {
+            if pixel[3] != 0 {
+                left = left.min(x as u32);
+                right = right.max(x as u32 + 1);
+                top = top.min(y as u32);
+                bottom = bottom.max(y as u32 + 1);
+            }
+        }
+    }
+    if bottom > top && right > left {
+        let mut pixels = Vec::with_capacity(((right - left) * (bottom - top) * 4) as usize);
+        for row in rendered
+            .pixels
+            .chunks_exact(rendered.width as usize * 4)
+            .skip(top as usize)
+            .take((bottom - top) as usize)
+        {
+            pixels.extend_from_slice(&row[(left * 4) as usize..(right * 4) as usize]);
+        }
+        rendered.pixels = pixels;
+        rendered.width = right - left;
+        rendered.height = bottom - top;
+    }
+    rendered
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,6 +676,7 @@ mod tests {
             album: 0,
             sender_id: 0,
             sender: None,
+            reactions: Vec::new(),
         }
     }
     #[test]
@@ -767,6 +799,7 @@ mod tests {
             album: 0,
             sender_id: 0,
             sender: None,
+            reactions: Vec::new(),
         };
         let rendered = engine.render(&message, 1.0, 180.0);
         assert!(rendered.width <= 180 && rendered.height > 0);

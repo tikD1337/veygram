@@ -81,6 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sender_id: 0,
                     sender: None,
                     photo: Some(photo),
+                    reactions: Vec::new(),
                 }],
             });
         }

@@ -291,3 +291,23 @@ These are hypotheses. Each is validated by before and after measurements.
   PNG into the user's temporary folder and deleted once TDLib reports the send as finished
   (`Event::LocalFileSendFinished`), on cancel, on logout, or at exit after the engine has closed.
   At most eight uploads are pending at a time.
+
+## 10. Decisions of 2026-11-22
+
+- **Reactions** (`tg_core::Reaction { emoji, count, chosen }`, `Message::reactions`,
+  `Command::ToggleReaction`, `Event::MessageReactionsChanged`). Only emoji reactions are mapped;
+  custom-emoji and paid reactions are skipped. At most 32 per message, each emoji at most 64 bytes.
+  Clients receive reactions inside `updateMessageInteractionInfo`; `updateMessageReactions` is the
+  bot-only variant and maps to the same event.
+- **Toggling reads TDLib's state, not the UI's.** The engine keeps no message copy, so
+  `ToggleReaction` first sends `getMessage` and, from that answer, `removeMessageReaction` when the
+  user has chosen the reaction, otherwise `addMessageReaction`. An existing reaction is sent in
+  Telegram's spelling (the heart has no variation selector). TDLib applies the change locally at once,
+  drops older choices beyond the account's limit and sends `updateMessageInteractionInfo`.
+  Toggles of one message run one at a time: later clicks wait (at most 8 per message, 32 messages)
+  until the previous mutation is answered, so each reads the state the previous one left; an error
+  releases the next waiting toggle.
+- **Chips are laid out in Rust and drawn by Slint**, inside the bubble below the text or media; the
+  time joins the last chip row when it fits, as in Telegram Desktop. Their emoji are coloured rasters
+  from the message text engine (a few KiB each), counted in the 96 MiB viewport budget and freed with
+  their row. Interaction updates that leave the reaction list unchanged (view counts) cause no relayout.

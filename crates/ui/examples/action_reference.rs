@@ -41,6 +41,7 @@ fn fixture(n: i64) -> tg_core::Message {
             sender: "Anna Petrova".into(),
             preview: "A synthetic message with a compact quote".into(),
         }),
+        reactions: Vec::new(),
     }
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {

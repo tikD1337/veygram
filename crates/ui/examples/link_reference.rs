@@ -218,6 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         album: 0,
         sender_id: 0,
         sender: None,
+        reactions: Vec::new(),
     }];
     let requests: Rc<RefCell<Vec<tg_core::FileRequest>>> = Rc::default();
     let captured = requests.clone();

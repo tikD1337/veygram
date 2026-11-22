@@ -9,6 +9,7 @@ pub enum CommandKind {
     OpenMessageContent,
     ReplyText,
     EditText,
+    ToggleReaction,
     DeleteMessages,
     ForwardMessages,
     GetMessageProperties,
@@ -73,6 +74,13 @@ pub enum Command {
         chat: ChatId,
         message: MessageId,
         text: String,
+    },
+    /// Add the reaction if the current user has not chosen it, otherwise remove it. The engine
+    /// decides from TDLib's current message state, not from a possibly stale UI copy.
+    ToggleReaction {
+        chat: ChatId,
+        message: MessageId,
+        reaction: String,
     },
     /// One album at most (10 IDs), ascending order.
     DeleteMessages {

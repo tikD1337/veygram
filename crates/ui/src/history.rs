@@ -194,6 +194,7 @@ mod tests {
             album: 0,
             sender_id: 0,
             sender: None,
+            reactions: Vec::new(),
         }
     }
     fn page(h: &mut History, start: i64, end: i64, newer: bool) {

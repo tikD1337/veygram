@@ -857,3 +857,99 @@ fn streamable_video_maps_partial_path_and_contiguous_range() {
         assert!(!partial.completed);
     }
 }
+
+#[test]
+fn reactions_map_emoji_entries_and_skip_custom_paid_and_oversized_ones() {
+    use serde_json::json;
+    let reactions = json!({"reactions":[
+        {"type":{"@type":"reactionTypeEmoji","emoji":"👍"},"total_count":5,"is_chosen":true},
+        {"type":{"@type":"reactionTypeCustomEmoji","custom_emoji_id":"1"},"total_count":2,"is_chosen":false},
+        {"type":{"@type":"reactionTypePaid"},"total_count":9,"is_chosen":false},
+        {"type":{"@type":"reactionTypeEmoji","emoji":"x".repeat(65)},"total_count":1,"is_chosen":false},
+        {"type":{"@type":"reactionTypeEmoji","emoji":"\u{2764}"},"total_count":1,"is_chosen":false}]});
+    let page = json!({"@type":"messages","@extra":{"command":"history","chat":7,"before":0},
+        "messages":[{"id":1048576,"chat_id":7,"date":1,"is_outgoing":false,
+            "interaction_info":{"view_count":0,"forward_count":0,"reactions":reactions},
+            "content":{"@type":"messageText","text":{"text":"hi","entities":[]}}}]});
+    let events = decode(&mut Decoder::default(), &page.to_string());
+    let Event::MessagesLoaded { messages, .. } = &events[0] else {
+        panic!("expected page")
+    };
+    let expected = vec![
+        tg_core::Reaction {
+            emoji: "👍".into(),
+            count: 5,
+            chosen: true,
+        },
+        tg_core::Reaction {
+            emoji: "\u{2764}".into(),
+            count: 1,
+            chosen: false,
+        },
+    ];
+    assert_eq!(messages[0].reactions, expected);
+
+    let update = json!({"@type":"updateMessageInteractionInfo","chat_id":7,"message_id":1048576,
+        "interaction_info":{"view_count":3,"forward_count":0,"reactions":reactions}});
+    assert_eq!(
+        decode(&mut Decoder::default(), &update.to_string()),
+        vec![Event::MessageReactionsChanged {
+            chat: ChatId(7),
+            message: MessageId(1048576),
+            reactions: expected.clone(),
+        }]
+    );
+    // Null interaction info means the reactions are gone.
+    let cleared = json!({"@type":"updateMessageInteractionInfo","chat_id":7,
+        "message_id":1048576,"interaction_info":null});
+    assert_eq!(
+        decode(&mut Decoder::default(), &cleared.to_string()),
+        vec![Event::MessageReactionsChanged {
+            chat: ChatId(7),
+            message: MessageId(1048576),
+            reactions: vec![],
+        }]
+    );
+    let bots = json!({"@type":"updateMessageReactions","chat_id":7,"message_id":1048576,
+        "date":1,"reactions":reactions["reactions"]});
+    assert_eq!(
+        decode(&mut Decoder::default(), &bots.to_string()),
+        vec![Event::MessageReactionsChanged {
+            chat: ChatId(7),
+            message: MessageId(1048576),
+            reactions: expected,
+        }]
+    );
+}
+
+#[test]
+fn reaction_lists_are_bounded_and_failures_keep_the_command_identity() {
+    use serde_json::json;
+    let many: Vec<_> = (0..40)
+        .map(|i| {
+            json!({"type":{"@type":"reactionTypeEmoji","emoji":format!("e{i}")},
+            "total_count":1,"is_chosen":false})
+        })
+        .collect();
+    let update = json!({"@type":"updateMessageReactions","chat_id":7,"message_id":1048576,
+        "date":1,"reactions":many});
+    let events = decode(&mut Decoder::default(), &update.to_string());
+    assert!(
+        matches!(&events[..], [Event::MessageReactionsChanged { reactions, .. }] if reactions.len() == tg_core::MAX_REACTIONS)
+    );
+    for tag in ["toggle_reaction", "reaction"] {
+        let events = decode(
+            &mut Decoder::default(),
+            &json!({"@type":"error","code":400,"message":"REACTION_INVALID","@extra":{"command":tag}})
+                .to_string(),
+        );
+        assert!(
+            matches!(&events[..], [Event::CommandFailed { command: tg_core::CommandKind::ToggleReaction, error }] if error.message == "This reaction is not available here.")
+        );
+    }
+    // The tagged getMessage answer is consumed by the engine, not shown as a message.
+    let answer = json!({"@type":"message","id":1048576,"chat_id":7,"date":1,"is_outgoing":false,
+        "content":{"@type":"messageText","text":{"text":"hi","entities":[]}},
+        "@extra":{"command":"toggle_reaction","chat":7,"message":1048576,"reaction":"👍"}});
+    assert!(decode(&mut Decoder::default(), &answer.to_string()).is_empty());
+}
